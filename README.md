@@ -50,25 +50,32 @@ All intelligence and control flow reside in the backend agent.
 
 ## ⚙️ Setup Instructions
 
-### 1️⃣ Clone the repository
+### 1️. Clone the repository
 ```bash
 git clone https://github.com/pratiksha-dhavane/ai_agent_chatbot.git
 cd ai_agent_chatbot
 ```
 
-### 2️⃣ Install dependencies
+### 2. Create and activate a virtual environment (recommended)
+
+```bash
+conda create -n search-engine-chatbot python=3.11
+conda activate search-engine-chatbot
+```
+
+### 3. Install dependencies
 ```bash
 pip install -r requirements.txt
 ```
 
-### 3️⃣ Configure environment variables
+### 4. Configure environment variables
 Create a `.env` file in the project root:
 
 ```env
 GOOGLE_API_KEY=your_api_key_here
 ```
 
-### 4️⃣ Run the application
+### 5. Run the application
 ```bash
 streamlit run app.py
 ```
