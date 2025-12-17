@@ -13,3 +13,4 @@ python-dotenv==1.2.1
 # LangGraph (for framework version later)
 langgraph==1.0.5
 langchain-core==1.2.1
+langchain-community==0.4.1
