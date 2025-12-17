@@ -1,0 +1,15 @@
+# LLM
+google-generativeai==0.8.5
+
+# UI
+streamlit==1.52.1
+
+# Search tool (DuckDuckGo)
+ddgs==9.9.3
+
+# Env vars
+python-dotenv==1.2.1
+
+# LangGraph (for framework version later)
+langgraph==1.0.5
+langchain-core==1.2.1
