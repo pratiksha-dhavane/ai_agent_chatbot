@@ -12,6 +12,7 @@ sys.path.append(os.path.dirname(__file__))
 
 from ai_agent.decision_prompt import decision_prompt_flash, decision_prompt_gemma
 from ai_agent.synthesis_prompt import synthesis_prompt_flash, synthesis_prompt_gemma
+from ai_agent.verify_prompt import verify_prompt
 
 load_dotenv()
 api_key = os.getenv("GOOGLE_API_KEY")
@@ -34,6 +35,7 @@ class AgentState(TypedDict):
     decision_model : str 
     search_result : str 
     final_answer : str
+    verification : str 
 
 def decide_node(state: AgentState) -> AgentState:
     """
@@ -182,7 +184,81 @@ def should_search(state: AgentState) -> Literal["search", "answer"]:
     if action == "SEARCH":
         return "search"
     else:
-        return "answer" 
+        return "answer"
+
+def verify(state: AgentState) -> AgentState:
+    """
+    Checks whether the final answer is safe, grounded, and correctly routed.
+    """
+
+    user_input = state["user_input"]
+    final_answer = state.get("final_answer","")
+    search_result = state.get("search_result","")
+    decision = state.get("decision", {})
+
+    today = date.today().isoformat()
+
+    search_context = (
+        search_result.strip()
+        if search_result and search_result.strip()
+        else "NO SEARCH WAS USED"
+    )
+
+    prompt = verify_prompt.format(today=today,user_input=user_input,search_result=search_context,final_answer=final_answer)
+
+    verify_models = [
+        ("flash_lite", flash_lite_model),
+        ("gemma", gemma_model)
+    ]
+
+    try:
+        for name, model in verify_models:
+            try:
+                response = model.generate_content(prompt)
+                verfiy_text = response.text.strip()
+
+                cleaned = (
+                    verfiy_text
+                    .replace("```json", "")
+                    .replace("```", "")
+                    .replace("json", "")
+                    .strip()
+                )
+
+                verdict = json.loads(cleaned)
+
+                print(f"Verdict: {verdict.get('verdict','')} made by model: {name}")
+                return {
+                    **state,
+                    "verification" : verdict
+                }
+            
+            except Exception as e:
+                print(f"Verification failed on model: {e}")
+                continue
+        
+    except Exception as e:
+        # Conservative default: fail verification
+        print(f"[ERROR] Verification failed: {e}")
+        return {
+            **state,
+            "verification": {
+                "verdict": "fail",
+                "reason": "verification_error"
+            }
+        }
+    
+def verification_router(state: AgentState) -> Literal["pass","fail"]:
+    """
+    Routes based on verification result.
+    """
+
+    verification = state["verification"]
+
+    if verification.get("verdict") == "pass":
+        return "pass"
+    else:
+        return "fail" 
 
 def create_agent_graph():
     """
@@ -197,6 +273,7 @@ def create_agent_graph():
     workflow.add_node("search", search_node)
     workflow.add_node("synthesize", synthesis_node)
     workflow.add_node("answer", answer_node)
+    workflow.add_node("verify",verify)
 
     # Setting the entry point
     workflow.set_entry_point("decide")
@@ -211,8 +288,18 @@ def create_agent_graph():
     
     # Add remaining edges
     workflow.add_edge("search", "synthesize")
-    workflow.add_edge("synthesize", END)
-    workflow.add_edge("answer", END)
+    workflow.add_edge("synthesize", "verify")
+    workflow.add_edge("answer", "verify")
+
+    # Verification routing
+    workflow.add_conditional_edges(
+        "verify",
+        verification_router,
+        {
+            "pass" : END,
+            "fail" : "search"
+        }
+    )
 
     # Compile the graph
     return workflow.compile() 
@@ -229,7 +316,8 @@ def run_agent(user_input: str) -> str:
         "decision" : {},
         "decision_model" : "",
         "search_result" : "",
-        "final_answer" : ""
+        "final_answer" : "",
+        "verification" : {}
     }
 
     try:
@@ -238,7 +326,7 @@ def run_agent(user_input: str) -> str:
         # Extract results for logging 
         decision = result.get("decision", {})
         decision_model = result.get("decision_model", "Unknown")
-        final_answer = result.get("final_answer", "No answer provided")
+        final_answer = result.get("final_answer", "No answer generated")
 
         # Log execution summary
         print("\n" + "-"*60)
