@@ -1,0 +1,258 @@
+from langgraph.graph import StateGraph, END, START
+from typing import TypedDict, Literal
+
+import json
+from datetime import date 
+import google.generativeai as genai
+from langchain_community.tools import DuckDuckGoSearchRun
+from dotenv import load_dotenv
+import os
+import sys
+sys.path.append(os.path.dirname(__file__))
+
+from ai_agent.decision_prompt import decision_prompt_flash, decision_prompt_gemma
+from ai_agent.synthesis_prompt import synthesis_prompt_flash, synthesis_prompt_gemma
+
+load_dotenv()
+api_key = os.getenv("GOOGLE_API_KEY")
+if not api_key:
+    raise RuntimeError("GOOGLE_API_KEY is not set....")
+
+genai.configure(api_key=api_key)
+
+# Initialize the models
+flash_model = genai.GenerativeModel("gemini-2.5-flash")
+flash_lite_model = genai.GenerativeModel("gemini-2.5-flash-lite")
+gemma_model = genai.GenerativeModel("gemma-3-12b-it")
+
+class AgentState(TypedDict):
+    """
+    AgentState: Defines the structure of data flowing through the graph.
+    """       
+    user_input : str
+    decision : dict 
+    decision_model : str 
+    search_result : str 
+    final_answer : str
+
+def decide_node(state: AgentState) -> AgentState:
+    """
+    Decision Node: Determines whether to use SEARCH tool or ANSWER directly.
+    """
+
+    # Extract user input from state
+    user_input = state["user_input"]
+    today = date.today().isoformat()
+
+    # Model fallback chain: try flash first, then flash_lite, then gemma
+    models = [
+        ("flash", flash_model, decision_prompt_flash),
+        ("flash_lite", flash_lite_model, decision_prompt_flash),
+        ("gemma", gemma_model, decision_prompt_gemma)
+    ]
+
+    last_error = None 
+
+    # try each model in order until one succeeds
+    for name, model, decision_prompt in models:
+        try:
+            # Build decision prompt
+            prompt = decision_prompt.format(user_input=user_input,today=today)
+
+            # Call the model to get decision
+            response = model.generate_content(prompt)
+            decision_text = response.text.strip()
+
+            # Parse the JSON Decision
+            cleaned = decision_text.strip().replace("```json", "").replace("```", "").replace("json", "").strip()
+            decision = json.loads(cleaned)
+            print(f"Decision made by model: {name}")
+            return {
+                **state,
+                "decision" : decision,
+                "decision_model" : name  
+            }
+        
+        except Exception as e:
+            last_error = e
+            print(f"[WARN] Decision failed on model {name}: {e}") 
+            continue
+
+    # Conservative fallback: default to SEARCH action
+    print(f"[ERROR] All decision models failed. Defaulting to SEARCH. Last error: {last_error}")
+    return {
+        **state,
+        "decision": {"action": "SEARCH"}, 
+        "decision_model": "fallback"
+    }
+
+search_tool = DuckDuckGoSearchRun()
+
+def search_node(state: AgentState) -> AgentState:
+    """
+    Search Node: Performs web search using DuckDuckGo
+    """
+
+    # Extract user_input from state
+    user_input = state["user_input"]
+
+    try:
+        # Run DuckDuckGo Search
+        print("[INFO] Running search tool...")
+        search_result = search_tool.run(user_input)
+
+        print(f"[SUCCESS] Search completed. Result length: {len(search_result)} chars")
+        return {
+            **state,
+            "search_result" : search_result
+        }
+    
+    except Exception as e:
+        print(f"[ERROR] {e}")
+        return {
+            **state,
+            "search_result" : "No search results"
+        }
+    
+def synthesis_node(state: AgentState) -> AgentState:
+    """
+    Synthesize Node: Generates final answer from search results.
+    """
+
+    user_input = state["user_input"]
+    tool_output = state["search_result"]
+    today = date.today().isoformat()
+
+    models = [
+        ("flash", flash_model, synthesis_prompt_flash),
+        ("flash_lite", flash_lite_model, synthesis_prompt_flash),
+        ("gemma", gemma_model, synthesis_prompt_gemma)
+    ]
+    
+    last_error = None
+
+    for name, model, systhesis_prompt in models:
+        try:
+            prompt = systhesis_prompt.format(user_input=user_input,tool_output=tool_output,today=today)
+
+            response = model.generate_content(prompt)
+            final_answer = response.text.strip()
+
+            print(f"[SUCCESS] Synthesis completed by model: {name}")
+            return {
+                **state,
+                "final_answer" : final_answer
+            }
+
+        except Exception as e:
+            last_error = e
+            print(f"[WARN] Synthesis failed on model {name}: {e}")
+            continue
+    
+    # If we reach here, ALL models failed
+    error_msg = f"Synthesis failed on all models. Last error: {last_error}"
+    print(f"[ERROR] {error_msg}")
+    return {
+        **state,
+        "final_answer": "No answer provided"
+    }
+
+def answer_node(state: AgentState) -> AgentState:
+    """
+    Answer Node: Returns direct answer without search.
+    """
+
+    decision = state["decision"]
+    answer_content = decision.get("content","No answer provided")
+
+    # Return updated state with final answer
+    print(f"[SUCCESS] Direct answer provided (no search needed)")
+    return {
+        **state, 
+        "final_answer": answer_content  
+    }  
+
+def should_search(state: AgentState) -> Literal["search", "answer"]:
+    """
+    Routing Function: Decides which path to take after decision node.
+    """
+    decision = state.get("decision", {})
+    action = decision.get("action", "SEARCH")  # Default to search if missing 
+
+    if action == "SEARCH":
+        return "search"
+    else:
+        return "answer" 
+
+def create_agent_graph():
+    """
+    Creates and compiles the LangGraph agent workflow.
+    """
+
+    # Initialize the graph with our state type
+    workflow = StateGraph(AgentState)
+
+    # Adding nodes to the graph
+    workflow.add_node("decide", decide_node)
+    workflow.add_node("search", search_node)
+    workflow.add_node("synthesize", synthesis_node)
+    workflow.add_node("answer", answer_node)
+
+    # Setting the entry point
+    workflow.set_entry_point("decide")
+
+    # Add conditional edges
+    workflow.add_conditional_edges("decide", 
+                                   should_search, 
+                                   {
+                                       "search" : "search",
+                                       "answer" : "answer"
+                                   })
+    
+    # Add remaining edges
+    workflow.add_edge("search", "synthesize")
+    workflow.add_edge("synthesize", END)
+    workflow.add_edge("answer", END)
+
+    # Compile the graph
+    return workflow.compile() 
+
+agent_graph = create_agent_graph()
+
+def run_agent(user_input: str) -> str:
+    """
+    Main function to run the LangGraph agent.
+    """
+
+    initial_state = {
+        "user_input" : user_input,
+        "decision" : {},
+        "decision_model" : "",
+        "search_result" : "",
+        "final_answer" : ""
+    }
+
+    try:
+        result = agent_graph.invoke(initial_state)
+
+        # Extract results for logging 
+        decision = result.get("decision", {})
+        decision_model = result.get("decision_model", "Unknown")
+        final_answer = result.get("final_answer", "No answer provided")
+
+        # Log execution summary
+        print("\n" + "-"*60)
+        print("Execution Summary:")
+        print(f"  • Decision: {decision.get('action', 'N/A')}")
+        print(f"  • Model Used: {decision_model}")
+        print(f"  • Answer Length: {len(final_answer)} characters")
+        print("-"*60 + "\n")
+
+        return final_answer
+    
+    except Exception as e:
+
+        # Handle any errors during execution
+        error_msg = f"Agent execution failed: {str(e)}"
+        print(error_msg)
+        return "No answer provided"
