@@ -27,8 +27,8 @@ Do NOT add explanations, text, or formatting
 Respond ONLY in valid JSON.
 
 Allowed formats:
-{{ "action": "SEARCH" }}
-{{ "action": "ANSWER", "content": "<direct answer>" }}
+{{ "action": "SEARCH", "reason" : "<why search is required>" }}
+{{ "action": "ANSWER", "reason" : "<why direct answer is safe>", "content": "<direct answer>" }}
 
 User question:
 {user_input}
@@ -63,9 +63,9 @@ IMPORTANT OUTPUT RULES:
 
 Allowed responses (exact format):
 
-{{"action":"SEARCH"}}
+{{ "action": "SEARCH", "reason" : "<why search is required>" }}
 
-{{"action":"ANSWER","content":"<direct answer>"}}
+{{ "action": "ANSWER", "reason" : "<why direct answer is safe>", "content": "<direct answer>" }}
 
 User question:
 {user_input}

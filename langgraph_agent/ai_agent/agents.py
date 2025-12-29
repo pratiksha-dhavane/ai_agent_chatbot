@@ -1,7 +1,8 @@
-from langgraph.graph import StateGraph, END, START
+from langgraph.graph import StateGraph, END
 from typing import TypedDict, Literal
 
 import json
+import time
 from datetime import date 
 import google.generativeai as genai
 from langchain_community.tools import DuckDuckGoSearchRun
@@ -21,10 +22,22 @@ if not api_key:
 
 genai.configure(api_key=api_key)
 
+max_retries = 2
+
 # Initialize the models
 flash_model = genai.GenerativeModel("gemini-2.5-flash")
 flash_lite_model = genai.GenerativeModel("gemini-2.5-flash-lite")
 gemma_model = genai.GenerativeModel("gemma-3-12b-it")
+
+# Failure Modes
+FAILURE_TYPES = {
+    "DECISION_PARSE_ERROR",
+    "SEARCH_ERROR",
+    "SYNTHESIS_ERROR",
+    "VERIFICATION_NOT_GROUNDED",
+    "VERIFICATION_HALLUCINATION",
+    "VERIFICATION_LOW_CONFIDENCE"
+}
 
 class AgentState(TypedDict):
     """
@@ -33,9 +46,14 @@ class AgentState(TypedDict):
     user_input : str
     decision : dict 
     decision_model : str 
+    route_reason : str
     search_result : str 
     final_answer : str
-    verification : str 
+    verification : dict 
+    retries : int
+    failure_type : str 
+    confidence : float 
+    latency_ms : float
 
 def decide_node(state: AgentState) -> AgentState:
     """
@@ -69,10 +87,12 @@ def decide_node(state: AgentState) -> AgentState:
             cleaned = decision_text.strip().replace("```json", "").replace("```", "").replace("json", "").strip()
             decision = json.loads(cleaned)
             print(f"Decision made by model: {name}")
+            print(f"Routing reason: {decision.get('reason', '')  }")
             return {
                 **state,
                 "decision" : decision,
-                "decision_model" : name  
+                "decision_model" : name,
+                "route_reason" : decision.get("reason", "")  
             }
         
         except Exception as e:
@@ -84,8 +104,10 @@ def decide_node(state: AgentState) -> AgentState:
     print(f"[ERROR] All decision models failed. Defaulting to SEARCH. Last error: {last_error}")
     return {
         **state,
-        "decision": {"action": "SEARCH"}, 
-        "decision_model": "fallback"
+        "decision": {"action": "SEARCH"},
+        "decision_model": "fallback",
+        "route_reason": "Decision model failed on all attempts; defaulting to SEARCH",
+        "failure_type" : "DECISION_PARSE_ERROR" 
     }
 
 search_tool = DuckDuckGoSearchRun()
@@ -113,7 +135,8 @@ def search_node(state: AgentState) -> AgentState:
         print(f"[ERROR] {e}")
         return {
             **state,
-            "search_result" : "No search results"
+            "search_result" : e,
+            "failure_type" : "SEARCH_ERROR"
         }
     
 def synthesis_node(state: AgentState) -> AgentState:
@@ -156,7 +179,8 @@ def synthesis_node(state: AgentState) -> AgentState:
     print(f"[ERROR] {error_msg}")
     return {
         **state,
-        "final_answer": "No answer provided"
+        "final_answer": error_msg,
+        "failure_type" : "SYNTHESIS_ERROR"
     }
 
 def answer_node(state: AgentState) -> AgentState:
@@ -228,9 +252,46 @@ def verify(state: AgentState) -> AgentState:
                 verdict = json.loads(cleaned)
 
                 print(f"Verdict: {verdict.get('verdict','')} made by model: {name}")
+
+                if verdict.get("verdict") == "pass":
+                    return {
+                        **state,
+                        "verification" : verdict,
+                        "failure_type" : None,
+                        "confidence": 0.9 
+                    }
+
+                failure_type = None
+
+                if verdict.get("verdict") == "fail":
+                    reason = verdict.get("reason","")
+                    reasons = [r.strip() for r in reason.split("|")] 
+
+                    if "hallucination" in reasons:
+                        failure_type = "VERIFICATION_HALLUCINATION"
+                    elif "grounding" in reasons:
+                        failure_type = "VERIFICATION_NOT_GROUNDED"
+                    elif "routing" in reasons:
+                        failure_type = "DECISION_PARSE_ERROR"
+                    elif "format" in reasons:
+                        failure_type = "SYNTHESIS_ERROR"
+                    else:
+                        failure_type = "VERIFICATION_NOT_GROUNDED"
+
+                if failure_type == "VERIFICATION_HALLUCINATION":
+                    confidence = 0.1
+                elif failure_type == "VERIFICATION_NOT_GROUNDED":
+                    confidence = 0.4
+                else:
+                    confidence = 0.3
+
+                print(f"Verification failure type: {failure_type} with confidence {confidence}")  
+
                 return {
                     **state,
-                    "verification" : verdict
+                    "verification" : verdict,
+                    "failure_type" : failure_type,
+                    "confidence" : confidence
                 }
             
             except Exception as e:
@@ -244,21 +305,47 @@ def verify(state: AgentState) -> AgentState:
             **state,
             "verification": {
                 "verdict": "fail",
-                "reason": "verification_error"
-            }
+                "reason": "format"
+            },
+            "failure_type": "SYNTHESIS_ERROR",
+            "confidence" : 0.3
         }
-    
-def verification_router(state: AgentState) -> Literal["pass","fail"]:
+
+def verification_router(state: AgentState) -> Literal["pass","retry","stop","abort"]:
     """
     Routes based on verification result.
     """
 
     verification = state["verification"]
+    retries = state.get("retries", 0)
+    failure_type = state.get("failure_type", "")
 
+    # Success path
     if verification.get("verdict") == "pass":
         return "pass"
-    else:
-        return "fail" 
+    
+    # Hard stop on halluciations
+    if failure_type == "VERIFICATION_HALLUCINATION":
+        return "abort"
+    
+    # Failure path
+    if retries < max_retries:
+        return "retry"
+    
+    # Retries exhausted
+    return "stop"
+
+def increment_retry(state : AgentState) -> AgentState:
+    return {
+        **state,
+        "retries" : state.get("retries",0) + 1
+    }
+
+def abort_node(state: AgentState) -> AgentState:
+    return {
+        **state,
+        "final_answer" : "I can't reliably answer this question based on verified information. Please try rephrasing or check an authoritative source."
+    } 
 
 def create_agent_graph():
     """
@@ -273,7 +360,9 @@ def create_agent_graph():
     workflow.add_node("search", search_node)
     workflow.add_node("synthesize", synthesis_node)
     workflow.add_node("answer", answer_node)
-    workflow.add_node("verify",verify)
+    workflow.add_node("verify", verify)
+    workflow.add_node("increment_retry", increment_retry)
+    workflow.add_node("abort", abort_node)
 
     # Setting the entry point
     workflow.set_entry_point("decide")
@@ -297,9 +386,14 @@ def create_agent_graph():
         verification_router,
         {
             "pass" : END,
-            "fail" : "search"
+            "retry" : "increment_retry",
+            "stop" : END,
+            "abort" : "abort"
         }
     )
+
+    workflow.add_edge("increment_retry", "search")
+    workflow.add_edge("abort", END)
 
     # Compile the graph
     return workflow.compile() 
@@ -312,21 +406,31 @@ def run_agent(user_input: str) -> str:
     """
 
     initial_state = {
-        "user_input" : user_input,
-        "decision" : {},
-        "decision_model" : "",
-        "search_result" : "",
-        "final_answer" : "",
-        "verification" : {}
+        "user_input": user_input,
+        "decision": {},
+        "decision_model": "",
+        "route_reason": None,
+        "search_result": None,
+        "final_answer": None,
+        "verification": None,
+        "retries": 0,
+        "failure_type": None,
+        "confidence": None,
+        "latency_ms": None
     }
 
+    start_time = time.time()
     try:
         result = agent_graph.invoke(initial_state)
+        latency_ms = round((time.time() - start_time) * 1000, 2)
+        result["latency_ms"] = latency_ms
 
         # Extract results for logging 
         decision = result.get("decision", {})
         decision_model = result.get("decision_model", "Unknown")
         final_answer = result.get("final_answer", "No answer generated")
+
+        print(result) 
 
         # Log execution summary
         print("\n" + "-"*60)
