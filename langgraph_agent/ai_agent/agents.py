@@ -39,7 +39,7 @@ FAILURE_TYPES = {
     "VERIFICATION_LOW_CONFIDENCE"
 }
 
-class AgentState(TypedDict):
+class AgentState(TypedDict, total=False):
     """
     AgentState: Defines the structure of data flowing through the graph.
     """       
@@ -412,7 +412,7 @@ def run_agent(user_input: str) -> str:
         "route_reason": None,
         "search_result": None,
         "final_answer": None,
-        "verification": None,
+        "verification": {},
         "retries": 0,
         "failure_type": None,
         "confidence": None,
