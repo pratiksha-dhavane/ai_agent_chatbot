@@ -3,54 +3,110 @@
 This repository contains an **AI agent chatbot** implemented in two variants:
 
 - **Baseline Agent** – a simple, linear implementation  
-- **LangGraph Agent** – a graph-based implementation with verification and recovery
+- **LangGraph Agent** – a graph-based implementation with verification, retries, and safety controls  
 
-Both implementations use **Google Gemini models** and a **Streamlit-based chat interface**.
-They share the same prompts, models, and tools — the difference lies in how the
-agent’s execution flow is structured.
+Both agents use **Google Gemini models** and a **Streamlit-based chat interface**.  
+They share the same prompts, models, and tools — the difference lies in **how execution flow, verification, and recovery are handled**.
 
-The objective of this project is to demonstrate **core agent design principles**
-with clear, explicit control flow and minimal hidden abstractions.
+The goal of this project is to demonstrate **production-oriented agent design principles** with **explicit control flow**, **defensive handling**, and **minimal hidden abstractions**.
 
 ---
 
 ## 🚀 What this project does
 
-The chatbot behaves like an AI agent that:
+The chatbot behaves like a real-world AI agent that:
 
-- Accepts user questions through a chat-style UI
-- Decides whether a question can be answered directly or requires external search
-- Uses DuckDuckGo search for real-world or time-sensitive queries
-- Synthesizes a grounded final answer using retrieved information
+- Accepts natural language questions via a chat-style UI
+- Decides whether a query can be answered directly or requires external search
+- Uses DuckDuckGo search for real-world and time-sensitive information
+- Synthesizes grounded answers using retrieved context
 - Verifies answers before returning them (LangGraph agent)
-- Falls back across multiple models when a model is unavailable
+- Handles failures, retries, and hallucinations explicitly
+- Falls back across multiple LLMs when needed
 
 ---
 
 ## 🧠 Agent Capabilities
 
 - **Decision routing** between direct answering and tool usage  
-- **External search** using DuckDuckGo  
-- **Answer synthesis** with strict formatting constraints  
-- **Answer verification and recovery** (LangGraph agent)  
+- **External search** via DuckDuckGo  
+- **Answer synthesis** with controlled formatting  
+- **Answer verification** (grounding, hallucination, routing, format)  
+- **Failure-aware retries** with bounded limits  
+- **Hallucination abort mechanism** for safety  
 - **Multi-model fallback** (Gemini Flash, Flash Lite, Gemma)  
-- **Defensive parsing** of model outputs  
-- **Stateless backend design** (each query is handled independently)
+- **Confidence scoring** based on verification outcome  
+- **Latency tracking** per user query  
+- **Stateless backend design** (each query is independent)
 
 ---
 
 ## 🧠 Agent Implementations
 
-### Baseline Agent
-- Linear, single-pass execution
-- No verification or retries
-- Designed to clearly demonstrate core agent logic
+### 1️⃣ Baseline Agent
 
-### LangGraph Agent
-- Explicit graph-based workflow using LangGraph
-- Adds a verification step to validate grounding, routing correctness, and format
-- Supports recovery by falling back to search when verification fails
-- Makes control flow easier to visualize and extend
+**Purpose:** Demonstrate core agent logic with minimal complexity.
+
+- Linear, single-pass execution
+- Decision → (optional search) → answer
+- No verification or retries
+- Easy to understand and reason about
+- Useful as a learning and comparison baseline
+
+---
+
+### 2️⃣ LangGraph Agent (Production-Oriented)
+
+**Purpose:** Demonstrate a robust, verifiable agent workflow.
+
+Key characteristics:
+
+- Explicit graph-based orchestration using **LangGraph**
+- Separate nodes for decision, search, synthesis, and verification
+- Verification layer checks:
+  - grounding against search results
+  - hallucinations
+  - routing correctness
+  - output format
+- **Bounded retries** to avoid infinite loops
+- **Immediate abort on hallucination**
+- Failure-type classification to drive recovery behavior
+- Confidence and latency attached to every execution
+
+This implementation shows how safety, reliability, and observability can be layered
+on top of a basic agent without changing the core logic.
+
+---
+
+## 🛡️ Verification & Safety Logic
+
+The LangGraph agent verifies every generated answer and classifies failures into
+explicit categories:
+
+- `VERIFICATION_NOT_GROUNDED` – answer not supported by search results
+- `VERIFICATION_HALLUCINATION` – fabricated or incorrect facts
+- `SYNTHESIS_ERROR` – formatting or generation issues
+- `DECISION_PARSE_ERROR` – routing or parsing failures
+
+### Safety rules:
+- Hallucinations → **immediate abort**
+- Other failures → **bounded retries**
+- Retries exhausted → safe stop with explanation
+
+---
+
+## 📊 Observability
+
+For every query, the agent tracks:
+
+- Routing decision and reason
+- Model used
+- Failure type (if any)
+- Retry count
+- Confidence score
+- End-to-end latency (ms)
+
+This makes the agent **debuggable, explainable**.
 
 ---
 
@@ -111,20 +167,19 @@ streamlit run langgraph_agent/app.py
 
 This project is designed to:
 
-- Focus on fundamental agent behavior
-- Keep control flow explicit and debuggable
-- Demonstrate both procedural and graph-based orchestration
-- Serve as a clean foundation for more advanced agent patterns
+- Demonstrate real-world AI agent design
+- Keep execution flow explicit and inspectable
+- Show how verification and safety can be added incrementally
+- Serve as a portfolio-quality reference for agent architectures
 
-The baseline implementation remains intentionally stable, while the LangGraph
-implementation demonstrates how verification and recovery can be layered on
-top without changing the core agent logic.
+The baseline agent stays intentionally simple, while the LangGraph agent illustrates how production concerns (verification, retries, safety) can be layered on cleanly.
 
 ---
 
 ## 📝 Notes
 
 - The agent backend is **stateless**
+- No user data is persisted
 - External dependencies are kept **minimal and explicit**
 - Verification logic exists only in the LangGraph agent
 - This project is intended for **learning, experimentation, and portfolio use**
