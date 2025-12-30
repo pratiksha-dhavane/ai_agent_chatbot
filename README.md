@@ -6,38 +6,252 @@ This repository contains an **AI agent chatbot** implemented in two variants:
 - **LangGraph Agent** – a graph-based implementation with verification, retries, and safety controls  
 
 Both agents use **Google Gemini models** and a **Streamlit-based chat interface**.  
-They share the same prompts, models, and tools — the difference lies in **how execution flow, verification, and recovery are handled**.
+They share the same prompts, models, and tools, the difference lies in **how execution flow, verification, and recovery are handled**.
 
 The goal of this project is to demonstrate **production-oriented agent design principles** with **explicit control flow**, **defensive handling**, and **minimal hidden abstractions**.
 
 ---
 
-## 🚀 What this project does
+## 🧭 Agent Execution Graph & Architecture
 
-The chatbot behaves like a real-world AI agent that:
+The LangGraph-based agent is implemented as an **explicit control-flow execution graph**.  
+This graph defines *how a single user query moves through the system*, including decision-making,
+tool usage, verification, retries, and termination.
 
-- Accepts natural language questions via a chat-style UI
-- Decides whether a query can be answered directly or requires external search
-- Uses DuckDuckGo search for real-world and time-sensitive information
-- Synthesizes grounded answers using retrieved context
-- Verifies answers before returning them (LangGraph agent)
-- Handles failures, retries, and hallucinations explicitly
-- Falls back across multiple LLMs when needed
+> The graph does **not** represent a neural network or model internals.  
+> It represents **deterministic orchestration logic** for a stateless AI agent.
+
+Each query enters the graph, flows through a bounded set of nodes, and terminates with either a verified answer or a safe abort.
 
 ---
 
-## 🧠 Agent Capabilities
+## 🔁 Execution Flow Overview
 
-- **Decision routing** between direct answering and tool usage  
-- **External search** via DuckDuckGo  
-- **Answer synthesis** with controlled formatting  
-- **Answer verification** (grounding, hallucination, routing, format)  
-- **Failure-aware retries** with bounded limits  
-- **Hallucination abort mechanism** for safety  
-- **Multi-model fallback** (Gemini Flash, Flash Lite, Gemma)  
-- **Confidence scoring** based on verification outcome  
-- **Latency tracking** per user query  
-- **Stateless backend design** (each query is independent)
+At a high level, the agent follows this pattern:
+
+1. Accept user input
+2. Decide how the query should be handled
+3. Generate an answer (with or without search)
+4. Verify the answer
+5. Either return, retry with more context, or abort safely
+
+There is **no hidden control flow** and **no implicit retries**. Every transition is explicit in the graph.
+
+---
+
+## 🧩 Node-by-Node Architectural Breakdown
+
+### `__start__` - Query Ingress
+
+**Role**
+- Entry point for every user query
+
+**Responsibilities**
+- Accept raw user input
+- Initialize agent state
+
+**State initialized**
+- `user_input`
+- `retry_count = 0`
+- `search_results = None`
+- `candidate_answer = None`
+
+This node performs no logic. It exists to make the execution lifecycle explicit and inspectable.
+
+---
+
+### `decide` - Routing & Risk Assessment
+
+**Role**
+- Central decision-making node
+
+**Purpose**
+- Decide *how* the query should be processed
+- Not responsible for answering the query
+
+**Responsibilities**
+- Classify query intent
+- Estimate hallucination risk
+- Decide whether external search is required
+
+**Possible routing outcomes**
+- Route directly to `answer`
+- Route to `search` (via retry path)
+
+This node enforces a key design principle:
+
+> Execution flow is determined explicitly by the agent logic, not implicitly by the LLM.
+
+---
+
+### `answer` - Direct LLM Generation
+
+**When executed**
+- Query is assessed as low-risk
+- No external or time-sensitive information is required
+
+**Responsibilities**
+- Call the LLM with the user query
+- Generate a candidate answer
+
+**What it does NOT do**
+- No verification
+- No safety judgment
+- No retries
+
+Answer generation and answer validation are intentionally separated to avoid mixing responsibilities.
+
+---
+
+### `verify` - Validation & Safety Gate
+
+**Role**
+- Final authority before any answer is returned to the user
+
+**Responsibilities**
+- Validate correctness and safety of the generated answer
+
+**Checks performed**
+- Grounding against search results (if available)
+- Hallucination detection
+- Output format validation
+- Routing correctness
+
+**Possible outcomes**
+- `pass` → answer is accepted
+- `retry` → recovery attempt required (bounded)
+- `abort` → execution terminated immediately
+
+No answer can reach the user without passing through this node.
+
+---
+
+### `abort` - Immediate Safety Termination
+
+**When triggered**
+- Hallucination detected
+- Critical safety violation
+
+**Behavior**
+- Stops execution immediately
+- Returns a safe failure response
+
+**Design rule**
+- Hallucinations are **never retried**
+
+This fail-fast behavior is intentional and mirrors real production safety requirements.
+
+---
+
+### `retry` → `increment_retry` - Controlled Recovery
+
+**When triggered**
+- Non-critical verification failures
+  (e.g. weak grounding, insufficient context)
+
+**Responsibilities**
+- Increment retry counter
+- Enforce retry limits
+- Redirect execution to `search`
+
+Retries are:
+- Explicit
+- Bounded
+- Observable
+
+This prevents silent loops and uncontrolled cost escalation.
+
+---
+
+### `search` - External Information Retrieval
+
+**Role**
+- Fetch real-world or time-sensitive information
+
+**Tool used**
+- DuckDuckGo Search
+
+**Output**
+- Structured search results added to agent state
+
+This node exists only when the agent determines that internal model knowledge is insufficient or risky.
+
+---
+
+### `synthesize` - Answer Synthesis with Context
+
+**Role**
+- Combine user query and retrieved search results
+
+**Responsibilities**
+- Generate a grounded, context-aware answer
+- Use retrieved data as supporting evidence
+
+The output of this node is always sent back to `verify` before being returned to the user.
+
+---
+
+### `__end__` - Execution Termination
+
+**When reached**
+- Verification passes
+- Or execution is aborted
+
+**Responsibilities**
+- Return final response
+- Attach metadata (confidence, latency, retry count)
+
+This marks the end of a single, stateless execution cycle.
+
+---
+
+## 🔒 Architectural Guarantees
+
+This graph guarantees that:
+
+- Every answer is explicitly verified
+- Hallucinations are never returned
+- Retries are bounded and observable
+- Tool usage is controlled and intentional
+- Execution flow is fully inspectable
+
+There are no hidden retries, no silent fallbacks, and no implicit state.
+
+---
+
+## 🧠 Stateless by Design
+
+The agent is intentionally **stateless**:
+
+- No conversation memory
+- No user history persistence
+- Each query is processed independently
+
+This simplifies reasoning, debugging, and production deployment.
+
+---
+
+## 🎯 Why a Graph-Based Design?
+
+Using a graph instead of a linear chain enables:
+
+- Clear separation of responsibilities
+- Safe branching and recovery paths
+- Easier extensibility (new nodes, tools, or checks)
+- Production-grade observability
+
+The graph exists to make behavior explicit, not to add complexity.
+
+---
+
+## 🚧 What This Agent Is Not (By Design)
+
+- Not autonomous
+- Not self-planning
+- Not self-improving
+- Not stateful across queries
+
+Those capabilities can be added later, but are intentionally out of scope for this implementation.
 
 ---
 
@@ -73,25 +287,7 @@ Key characteristics:
 - Failure-type classification to drive recovery behavior
 - Confidence and latency attached to every execution
 
-This implementation shows how safety, reliability, and observability can be layered
-on top of a basic agent without changing the core logic.
-
----
-
-## 🛡️ Verification & Safety Logic
-
-The LangGraph agent verifies every generated answer and classifies failures into
-explicit categories:
-
-- `VERIFICATION_NOT_GROUNDED` – answer not supported by search results
-- `VERIFICATION_HALLUCINATION` – fabricated or incorrect facts
-- `SYNTHESIS_ERROR` – formatting or generation issues
-- `DECISION_PARSE_ERROR` – routing or parsing failures
-
-### Safety rules:
-- Hallucinations → **immediate abort**
-- Other failures → **bounded retries**
-- Retries exhausted → safe stop with explanation
+This implementation shows how safety, reliability, and observability can be layered on top of a basic agent without changing the core logic.
 
 ---
 
@@ -106,7 +302,7 @@ For every query, the agent tracks:
 - Confidence score
 - End-to-end latency (ms)
 
-This makes the agent **debuggable, explainable**.
+This makes every execution debuggable, explainable, and suitable for production diagnostics.
 
 ---
 
