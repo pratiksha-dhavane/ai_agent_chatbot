@@ -1,5 +1,11 @@
 # AI Agent Chatbot
 
+This project implements a production-oriented AI agent that dynamically routes user queries between direct LLM responses and external search tools. It focuses on reliability, explicit control flow, and model fallback which is key challenges in real-world agentic systems.
+
+---
+
+## 🚀 Key Features
+
 This repository contains an **AI agent chatbot** implemented in two variants:
 
 - **Baseline Agent** – a simple, linear implementation  
