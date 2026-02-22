@@ -31,6 +31,9 @@ Respond ONLY with valid JSON. No explanations.
 User Question:
 {user_input}
 
+Rewritten search query:
+{query}
+
 Search Results:
 {search_result}
 

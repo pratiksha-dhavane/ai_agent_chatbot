@@ -14,6 +14,7 @@ sys.path.append(os.path.dirname(__file__))
 from ai_agent.decision_prompt import decision_prompt_flash, decision_prompt_gemma
 from ai_agent.synthesis_prompt import synthesis_prompt_flash, synthesis_prompt_gemma
 from ai_agent.verify_prompt import verify_prompt
+from ai_agent.memory_summary_prompt import memory_summary_prompt
 
 load_dotenv()
 api_key = os.getenv("GOOGLE_API_KEY")
@@ -44,6 +45,8 @@ class AgentState(TypedDict, total=False):
     AgentState: Defines the structure of data flowing through the graph.
     """       
     user_input : str
+    summary: str
+    recent_turns: list[dict]    
     decision : dict 
     decision_model : str 
     route_reason : str
@@ -62,6 +65,8 @@ def decide_node(state: AgentState) -> AgentState:
 
     # Extract user input from state
     user_input = state["user_input"]
+    summary = state["summary"]
+    recent_turns = state["recent_turns"]
     today = date.today().isoformat()
 
     # Model fallback chain: try flash first, then flash_lite, then gemma
@@ -77,7 +82,7 @@ def decide_node(state: AgentState) -> AgentState:
     for name, model, decision_prompt in models:
         try:
             # Build decision prompt
-            prompt = decision_prompt.format(user_input=user_input,today=today)
+            prompt = decision_prompt.format(user_input=user_input,today=today,summary=summary,recent_turns=recent_turns)
 
             # Call the model to get decision
             response = model.generate_content(prompt)
@@ -97,7 +102,7 @@ def decide_node(state: AgentState) -> AgentState:
         
         except Exception as e:
             last_error = e
-            print(f"[WARN] Decision failed on model {name}: {e}") 
+            # print(f"[WARN] Decision failed on model {name}: {e}") 
             continue
 
     # Conservative fallback: default to SEARCH action
@@ -118,7 +123,13 @@ def search_node(state: AgentState) -> AgentState:
     """
 
     # Extract user_input from state
-    user_input = state["user_input"]
+    # user_input = state["user_input"]
+
+    query = state.get("decision", {}).get("query", "")
+    if query != "":
+        user_input = query
+    else:
+        user_input = state.get("user_input", "")
 
     try:
         # Run DuckDuckGo Search
@@ -145,11 +156,12 @@ def synthesis_node(state: AgentState) -> AgentState:
     """
 
     user_input = state["user_input"]
+    query = state.get("decision", {}).get("query", "")
     tool_output = state["search_result"]
     today = date.today().isoformat()
 
     models = [
-        ("flash", flash_model, synthesis_prompt_flash),
+        # ("flash", flash_model, synthesis_prompt_flash),
         ("flash_lite", flash_lite_model, synthesis_prompt_flash),
         ("gemma", gemma_model, synthesis_prompt_gemma)
     ]
@@ -158,7 +170,7 @@ def synthesis_node(state: AgentState) -> AgentState:
 
     for name, model, systhesis_prompt in models:
         try:
-            prompt = systhesis_prompt.format(user_input=user_input,tool_output=tool_output,today=today)
+            prompt = systhesis_prompt.format(user_input=user_input,query=query,tool_output=tool_output,today=today)
 
             response = model.generate_content(prompt)
             final_answer = response.text.strip()
@@ -176,7 +188,7 @@ def synthesis_node(state: AgentState) -> AgentState:
     
     # If we reach here, ALL models failed
     error_msg = f"Synthesis failed on all models. Last error: {last_error}"
-    print(f"[ERROR] {error_msg}")
+    # print(f"[ERROR] {error_msg}")
     return {
         **state,
         "final_answer": error_msg,
@@ -216,9 +228,10 @@ def verify(state: AgentState) -> AgentState:
     """
 
     user_input = state["user_input"]
+    query = state.get("decision", {}).get("query", "")
     final_answer = state.get("final_answer","")
     search_result = state.get("search_result","")
-    decision = state.get("decision", {})
+    # decision = state.get("decision", {})
 
     today = date.today().isoformat()
 
@@ -228,7 +241,12 @@ def verify(state: AgentState) -> AgentState:
         else "NO SEARCH WAS USED"
     )
 
-    prompt = verify_prompt.format(today=today,user_input=user_input,search_result=search_context,final_answer=final_answer)
+    print(query)
+    prompt = verify_prompt.format(today=today,
+                                  user_input=user_input,
+                                  query=query,
+                                  search_result=search_context,
+                                  final_answer=final_answer)
 
     verify_models = [
         ("flash_lite", flash_lite_model),
@@ -295,7 +313,7 @@ def verify(state: AgentState) -> AgentState:
                 }
             
             except Exception as e:
-                print(f"Verification failed on model: {e}")
+                # print(f"Verification failed on model: {e}")
                 continue
         
     except Exception as e:
@@ -345,7 +363,40 @@ def abort_node(state: AgentState) -> AgentState:
     return {
         **state,
         "final_answer" : "I can't reliably answer this question based on verified information. Please try rephrasing or check an authoritative source."
-    } 
+    }
+
+def is_followup(user_input):
+    """
+    Simple function to detect if user question is follow up or not. 
+    """
+
+    markers = [
+        "it", "this", "that", "they",
+        "what about", "and", "also",
+        "its", "their"
+    ]
+    return any(m in user_input.lower() for m in markers) 
+
+def update_summary(existing_summary, recent_turns):
+    """
+    This function summarizes last few conversations with user.
+    """
+
+    conversation = ""
+
+    for turn in recent_turns:
+        for k, v in turn.items():
+            conversation += f"{k.capitalize()} : {v}\n"
+
+    prompt = memory_summary_prompt.format(existing_summary=existing_summary,conversation=conversation)
+
+    return gemma_model.generate_content(prompt).text.strip()
+
+def should_summarize(recent_turns, user_input, max_turns):
+    """
+    This function decides whether to summarize the conversation.
+    """
+    return len(recent_turns) >= max_turns and not is_followup(user_input)
 
 def create_agent_graph():
     """
@@ -400,13 +451,18 @@ def create_agent_graph():
 
 agent_graph = create_agent_graph()
 
-def run_agent(user_input: str) -> str:
+def run_agent(user_input: str, memory: dict) -> str:
     """
     Main function to run the LangGraph agent.
     """
 
+    summary = memory.get("summary", "")
+    recent_turns = memory.get("recent_turns", [])
+
     initial_state = {
         "user_input": user_input,
+        "summary": summary,
+        "recent_turns": recent_turns,
         "decision": {},
         "decision_model": "",
         "route_reason": None,
