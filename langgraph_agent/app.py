@@ -1,5 +1,5 @@
 import streamlit as st
-from ai_agent.agents import run_agent, update_summary, should_summarize
+from ai_agent.agents import run_agent, update_summary
 
 import os
 import sys
@@ -19,6 +19,9 @@ if "memory" not in st.session_state:
         "summary": "",
         "recent_turns": []
     }
+
+if "turn_count" not in st.session_state:
+    st.session_state.turn_count = 0
 
 # Display chat history
 for msg in st.session_state.messages:
@@ -51,6 +54,8 @@ if user_input:
                     }
                 )
 
+                st.session_state.turn_count += 1
+
                 st.session_state.memory["recent_turns"].insert(0,{
                     "user_input" : user_input,
                     "assistant" : answer
@@ -59,7 +64,7 @@ if user_input:
                 if len(st.session_state.memory["recent_turns"]) > max_turns:
                     st.session_state.memory["recent_turns"] = st.session_state.memory["recent_turns"][:max_turns] 
 
-                if should_summarize(st.session_state.memory["recent_turns"], user_input=user_input, max_turns=max_turns):
+                if st.session_state.turn_count % max_turns == 0:
                     new_summary = update_summary(
                         existing_summary = st.session_state.memory["summary"],
                         recent_turns = st.session_state.memory["recent_turns"]
