@@ -16,6 +16,9 @@ Do NOT restate the question.
 Question:
 {user_input}
 
+Rewritten search query:
+{query}
+
 Information:
 {tool_output}
 
@@ -42,6 +45,9 @@ If the answer depends on the current date, interpret it relative to today.
 
 Question:
 {user_input}
+
+Rewritten search query:
+{query}
 
 Information:
 {tool_output}
