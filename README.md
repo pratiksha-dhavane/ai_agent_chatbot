@@ -334,5 +334,5 @@ The baseline agent stays intentionally simple, while the LangGraph agent illustr
 
 ## 👩‍💻 Author
 
-**Pratiksha Dhavane**
+**Pratiksha Dhavane** 
 Data Scientist | Generative AI Practitioner
