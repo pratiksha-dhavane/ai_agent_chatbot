@@ -1,6 +1,6 @@
 # AI Agent Chatbot
 
-This project implements a production-oriented AI agent that dynamically routes user queries between direct LLM responses and external search tools. It focuses on reliability, explicit control flow, and model fallback which is key challenges in real-world agentic systems.
+This project implements a production-oriented AI agent that dynamically routes user queries between direct LLM responses and external search tools. It focuses on reliability, explicit control flow, model fallback and short-term memory - key challenges in real-world agentic systems.
 
 ---
 
@@ -8,26 +8,44 @@ This project implements a production-oriented AI agent that dynamically routes u
 
 This repository contains an **AI agent chatbot** implemented in two variants:
 
-- **Baseline Agent** – a simple, linear implementation  
-- **LangGraph Agent** – a graph-based implementation with verification, retries, and safety controls  
+- **Baseline Agent** - a simple, linear implementation
+- **LangGraph Agent** - a graph-based implementation with verification, retries, safety controls, and short-term memory
 
-Both agents use **Google Gemini models** and a **Streamlit-based chat interface**.  
-They share the same prompts, models, and tools, the difference lies in **how execution flow, verification, and recovery are handled**.
+The LangGraph agent uses **Google Gemini models** with **Groq (Llama)** as a fallback and a **Streamlit-based chat interface**.
 
-The goal of this project is to demonstrate **production-oriented agent design principles** with **explicit control flow**, **defensive handling**, and **minimal hidden abstractions**.
+The goal of this project is to demonstrate **production-oriented agent design principles** with **explicit control flow**, **defensive handling**, **short-term memory** and **minimal hidden abstractions**.
+
+---
+
+## 🧠 Short-Term Memory (Hybrid Architecture)
+
+The LangGraph agent implements a **hybrid short-term memory system** that combines a sliding window of recent turns with periodic summarization.
+
+### How it works
+
+**Sliding window** - the last 4 conversation turns are always kept in full and passed into every node that needs context.
+
+**Periodic summarization** - every 4 turns, the recent conversation is summarized into a persistent memory profile using Llama 3.3 70b. This summary accumulates facts about the user across the entire session.
+
+**Memory profile, not topic summary** - the summarization prompt is specifically designed to extract and preserve key user facts (name, preferences, what they are building, tools they use) rather than summarizing conversation topics. Facts are updated when the user provides new information and never dropped unless explicitly overwritten.
+
+### Memory flow
+
+Both the **decision node** and the **verification node** receive `summary` and `recent_turns` as context. This means:
+
+- The decision node checks memory before deciding to search, personal facts already known do not trigger a web search
+- The verification node uses memory context to correctly pass answers that are grounded in conversation history rather than search results
 
 ---
 
 ## 🧭 Agent Execution Graph & Architecture
 
-The LangGraph-based agent is implemented as an **explicit control-flow execution graph**.  
-This graph defines *how a single user query moves through the system*, including decision-making,
-tool usage, verification, retries, and termination.
+The LangGraph-based agent is implemented as an **explicit control-flow execution graph**. This graph defines how a single user query moves through the system, including decision-making, tool usage, verification, retries and termination.
 
-> The graph does **not** represent a neural network or model internals.  
-> It represents **deterministic orchestration logic** for a stateless AI agent.
+> The graph does **not** represent a neural network or model internals.
+> It represents **deterministic orchestration logic** for a stateful AI agent.
 
-Each query enters the graph, flows through a bounded set of nodes, and terminates with either a verified answer or a safe abort.
+Each query enters the graph, flows through a bounded set of nodes and terminates with either a verified answer or a safe abort.
 
 ---
 
@@ -35,11 +53,11 @@ Each query enters the graph, flows through a bounded set of nodes, and terminate
 
 At a high level, the agent follows this pattern:
 
-1. Accept user input
-2. Decide how the query should be handled
+1. Accept user input along with memory context (summary + recent turns)
+2. Decide how the query should be handled — checking memory first before routing to search
 3. Generate an answer (with or without search)
-4. Verify the answer
-5. Either return, retry with more context, or abort safely
+4. Verify the answer against search results, memory context and safety checks
+5. Either return, retry with more context or abort safely
 
 There is **no hidden control flow** and **no implicit retries**. Every transition is explicit in the graph.
 
@@ -49,251 +67,147 @@ There is **no hidden control flow** and **no implicit retries**. Every transitio
 
 ### `__start__` - Query Ingress
 
-**Role**
-- Entry point for every user query
+**Role** - Entry point for every user query
 
 **Responsibilities**
 - Accept raw user input
+- Load memory context (summary and recent turns) from session state
 - Initialize agent state
-
-**State initialized**
-- `user_input`
-- `retry_count = 0`
-- `search_results = None`
-- `candidate_answer = None`
-
-This node performs no logic. It exists to make the execution lifecycle explicit and inspectable.
 
 ---
 
 ### `decide` - Routing & Risk Assessment
 
-**Role**
-- Central decision-making node
+**Role** - Central decision-making node
 
-**Purpose**
-- Decide *how* the query should be processed
-- Not responsible for answering the query
+**Purpose** - Decide how the query should be processed, not responsible for answering it
 
 **Responsibilities**
-- Classify query intent
-- Estimate hallucination risk
+- Check memory context first, if the answer is already known, answer directly
+- Classify query intent and estimate hallucination risk
 - Decide whether external search is required
+- Rewrite the query into a focused standalone search query if search is needed
+
+**Memory-first rule** - personal facts provided by the user (name, preferences, what they are building) are answered directly from context without triggering a search
 
 **Possible routing outcomes**
 - Route directly to `answer`
-- Route to `search` (via retry path)
+- Route to `search`
 
-This node enforces a key design principle:
-
-> Execution flow is determined explicitly by the agent logic, not implicitly by the LLM.
+**Model fallback chain** - flash → flash_lite → llama-3.3-70b-versatile
 
 ---
 
 ### `answer` - Direct LLM Generation
 
-**When executed**
-- Query is assessed as low-risk
-- No external or time-sensitive information is required
+**When executed** - Query is low-risk or answerable from memory context
 
-**Responsibilities**
-- Call the LLM with the user query
-- Generate a candidate answer
+**Responsibilities** - Generate a candidate answer from memory or stable knowledge
 
-**What it does NOT do**
-- No verification
-- No safety judgment
-- No retries
-
-Answer generation and answer validation are intentionally separated to avoid mixing responsibilities.
+**What it does NOT do** - No verification, no safety judgment, no retries
 
 ---
 
 ### `verify` - Validation & Safety Gate
 
-**Role**
-- Final authority before any answer is returned to the user
+**Role** - Final authority before any answer is returned to the user
 
-**Responsibilities**
-- Validate correctness and safety of the generated answer
+**Context received** - user input, search results, memory summary, recent turns
 
 **Checks performed**
-- Grounding against search results (if available)
-- Hallucination detection
-- Output format validation
-- Routing correctness
+
+Conversational input check (runs first) - if the user is sharing personal information or asking about something they previously told the agent, the answer is passed immediately without further checks
+
+Grounding check - only applies when search results are present; fails only if the answer directly contradicts or fabricates beyond search results; rephrasing and logical inference are allowed
+
+Hallucination check - fails only if the answer invents specific facts contradicted by or implausible given search results
+
+Routing check - fails only if no search was used but the answer makes a time-sensitive or externally verifiable claim that cannot be answered from memory or stable knowledge
+
+Format check - fails only if the answer is empty, evasive or restates the question without answering
+
+**Default behavior** - when in doubt, pass; only fail on clear and obvious violations
 
 **Possible outcomes**
 - `pass` → answer is accepted
 - `retry` → recovery attempt required (bounded)
-- `abort` → execution terminated immediately
+- `abort` → execution terminated immediately on hallucination
 
-No answer can reach the user without passing through this node.
+**Model fallback chain** — flash_lite → llama-3.3-70b-versatile
 
 ---
 
 ### `abort` - Immediate Safety Termination
 
-**When triggered**
-- Hallucination detected
-- Critical safety violation
+**When triggered** - Hallucination detected
 
-**Behavior**
-- Stops execution immediately
-- Returns a safe failure response
+**Behavior** - Stops execution immediately, returns a safe failure response
 
-**Design rule**
-- Hallucinations are **never retried**
-
-This fail-fast behavior is intentional and mirrors real production safety requirements.
+**Design rule** - Hallucinations are never retried
 
 ---
 
 ### `retry` → `increment_retry` - Controlled Recovery
 
-**When triggered**
-- Non-critical verification failures
-  (e.g. weak grounding, insufficient context)
+**When triggered** - Non-critical verification failures such as weak grounding or insufficient context
 
-**Responsibilities**
-- Increment retry counter
-- Enforce retry limits
-- Redirect execution to `search`
+**Responsibilities** - Increment retry counter, enforce retry limits, redirect to search
 
-Retries are:
-- Explicit
-- Bounded
-- Observable
-
-This prevents silent loops and uncontrolled cost escalation.
+Retries are explicit, bounded and observable. This prevents silent loops and uncontrolled cost escalation.
 
 ---
 
 ### `search` - External Information Retrieval
 
-**Role**
-- Fetch real-world or time-sensitive information
+**Role** - Fetch real-world or time-sensitive information
 
-**Tool used**
-- DuckDuckGo Search
+**Tool used** - DuckDuckGo Search
 
-**Output**
-- Structured search results added to agent state
-
-This node exists only when the agent determines that internal model knowledge is insufficient or risky.
+**Query source** - uses the rewritten query from the decision node when available, falls back to raw user input
 
 ---
 
 ### `synthesize` - Answer Synthesis with Context
 
-**Role**
-- Combine user query and retrieved search results
+**Role** - Combine user query and retrieved search results into a grounded answer
 
-**Responsibilities**
-- Generate a grounded, context-aware answer
-- Use retrieved data as supporting evidence
+**Model fallback chain** - flash_lite → llama-3.1-8b-instant
 
-The output of this node is always sent back to `verify` before being returned to the user.
+The output is always sent back to `verify` before being returned to the user.
 
 ---
 
 ### `__end__` - Execution Termination
 
-**When reached**
-- Verification passes
-- Or execution is aborted
+**When reached** - Verification passes or execution is aborted
 
-**Responsibilities**
-- Return final response
-- Attach metadata (confidence, latency, retry count)
+**Responsibilities** - Return final response with metadata (confidence, latency, retry count)
 
-This marks the end of a single, stateless execution cycle.
+---
+
+## 🤖 Model Architecture
+
+| Task | Primary | Fallback 1 | Fallback 2 |
+|------|---------|------------|------------|
+| Decision | gemini-2.5-flash | gemini-2.5-flash-lite | llama-3.3-70b-versatile |
+| Synthesis | gemini-2.5-flash-lite | llama-3.1-8b-instant | — |
+| Verification | gemini-2.5-flash-lite | llama-3.3-70b-versatile | — |
+| Summarization | llama-3.3-70b-versatile | — | — |
+
+**Why two different Llama models** — llama-3.1-8b-instant is used for synthesis (speed matters, task is straightforward). llama-3.3-70b-versatile is used for decision, verification and summarization where reasoning quality and fact preservation matter more than raw speed.
 
 ---
 
 ## 🔒 Architectural Guarantees
 
-This graph guarantees that:
-
 - Every answer is explicitly verified
 - Hallucinations are never returned
 - Retries are bounded and observable
 - Tool usage is controlled and intentional
+- Memory context is always passed to decision and verification
 - Execution flow is fully inspectable
 
-There are no hidden retries, no silent fallbacks, and no implicit state.
-
----
-
-## 🧠 Stateless by Design
-
-The agent is intentionally **stateless**:
-
-- No conversation memory
-- No user history persistence
-- Each query is processed independently
-
-This simplifies reasoning, debugging, and production deployment.
-
----
-
-## 🎯 Why a Graph-Based Design?
-
-Using a graph instead of a linear chain enables:
-
-- Clear separation of responsibilities
-- Safe branching and recovery paths
-- Easier extensibility (new nodes, tools, or checks)
-- Production-grade observability
-
-The graph exists to make behavior explicit, not to add complexity.
-
----
-
-## 🚧 What This Agent Is Not (By Design)
-
-- Not autonomous
-- Not self-planning
-- Not self-improving
-- Not stateful across queries
-
-Those capabilities can be added later, but are intentionally out of scope for this implementation.
-
----
-
-## 🧠 Agent Implementations
-
-### 1️⃣ Baseline Agent
-
-**Purpose:** Demonstrate core agent logic with minimal complexity.
-
-- Linear, single-pass execution
-- Decision → (optional search) → answer
-- No verification or retries
-- Easy to understand and reason about
-- Useful as a learning and comparison baseline
-
----
-
-### 2️⃣ LangGraph Agent (Production-Oriented)
-
-**Purpose:** Demonstrate a robust, verifiable agent workflow.
-
-Key characteristics:
-
-- Explicit graph-based orchestration using **LangGraph**
-- Separate nodes for decision, search, synthesis, and verification
-- Verification layer checks:
-  - grounding against search results
-  - hallucinations
-  - routing correctness
-  - output format
-- **Bounded retries** to avoid infinite loops
-- **Immediate abort on hallucination**
-- Failure-type classification to drive recovery behavior
-- Confidence and latency attached to every execution
-
-This implementation shows how safety, reliability, and observability can be layered on top of a basic agent without changing the core logic.
+There are no hidden retries, no silent fallbacks and no implicit state.
 
 ---
 
@@ -302,40 +216,70 @@ This implementation shows how safety, reliability, and observability can be laye
 For every query, the agent tracks:
 
 - Routing decision and reason
-- Model used
+- Model used for decision
+- Search query rewrite (if applicable)
 - Failure type (if any)
 - Retry count
 - Confidence score
 - End-to-end latency (ms)
 
-This makes every execution debuggable, explainable, and suitable for production diagnostics.
-
 ---
 
 ## 🖥️ User Interface
 
-The frontend is implemented using **Streamlit** and provides a conversational
-chatbot experience.
+The frontend is implemented using **Streamlit** and manages session-level memory state.
 
-The UI is intentionally kept **thin and presentation-only**:
-- No decision logic
-- No tool handling
-- No model routing
+**UI responsibilities**
+- Render chat history
+- Maintain `memory` in session state (summary + recent_turns)
+- Append each turn to recent_turns after every response
+- Trigger summarization every 4 turns
+- Pass memory into `run_agent` on every call
 
-All intelligence, orchestration, and verification logic reside in the backend agent.
+**UI does NOT handle** — decision logic, tool handling, model routing or verification
+
+---
+
+## 🧠 Agent Implementations
+
+### 1️⃣ Baseline Agent
+
+**Purpose** - Demonstrate core agent logic with minimal complexity
+
+- Linear, single-pass execution
+- Decision → (optional search) → answer
+- No verification, no retries, no memory
+- Easy to understand and reason about
+- Useful as a learning and comparison baseline
+
+### 2️⃣ LangGraph Agent (Production-Oriented)
+
+**Purpose** - Demonstrate a robust, verifiable, memory-aware agent workflow
+
+Key characteristics:
+- Explicit graph-based orchestration using LangGraph
+- Hybrid short-term memory - sliding window + periodic summarization
+- Memory context passed into decision and verification nodes
+- Search query rewriting for focused retrieval
+- Separate nodes for decision, search, synthesis and verification
+- Verification layer with conversational input detection, grounding, hallucination, routing and format checks
+- Bounded retries to avoid infinite loops
+- Immediate abort on hallucination
+- Failure-type classification with distinct types per failure source
+- Confidence and latency attached to every execution
+- Multi-provider model fallback - Gemini primary, Groq/Llama fallback
 
 ---
 
 ## ⚙️ Setup Instructions
 
-### 1️. Clone the repository
+### 1. Clone the repository
 ```bash
 git clone https://github.com/pratiksha-dhavane/ai_agent_chatbot.git
 cd ai_agent_chatbot
 ```
 
-### 2. Create and activate a virtual environment (recommended)
-
+### 2. Create and activate a virtual environment
 ```bash
 conda create -n search-engine-chatbot python=3.11
 conda activate search-engine-chatbot
@@ -348,9 +292,9 @@ pip install -r requirements.txt
 
 ### 4. Configure environment variables
 Create a `.env` file in the project root:
-
 ```env
-GOOGLE_API_KEY=your_api_key_here
+GOOGLE_API_KEY=your_google_api_key_here
+GROQ_API_KEY=your_groq_api_key_here
 ```
 
 ### 5. Run the Baseline Agent
@@ -369,27 +313,26 @@ streamlit run langgraph_agent/app.py
 
 This project is designed to:
 
-- Demonstrate real-world AI agent design
+- Demonstrate real-world AI agent design with memory
 - Keep execution flow explicit and inspectable
-- Show how verification and safety can be added incrementally
+- Show how verification, safety and memory can be added incrementally
 - Serve as a portfolio-quality reference for agent architectures
 
-The baseline agent stays intentionally simple, while the LangGraph agent illustrates how production concerns (verification, retries, safety) can be layered on cleanly.
+The baseline agent stays intentionally simple, while the LangGraph agent illustrates how production concerns (verification, retries, safety, memory) can be layered on cleanly.
 
 ---
 
 ## 📝 Notes
 
-- The agent backend is **stateless**
-- No user data is persisted
-- External dependencies are kept **minimal and explicit**
+- The agent is **stateless within each graph execution** - memory is managed externally in Streamlit session state and passed in at the start of each run
+- No user data is persisted beyond the active browser session
+- External dependencies are kept minimal and explicit
 - Verification logic exists only in the LangGraph agent
-- This project is intended for **learning, experimentation, and portfolio use**
-
+- This project is intended for learning, experimentation and portfolio use
 
 ---
 
 ## 👩‍💻 Author
 
-**Pratiksha Dhavane**  
+**Pratiksha Dhavane**
 Data Scientist | Generative AI Practitioner
